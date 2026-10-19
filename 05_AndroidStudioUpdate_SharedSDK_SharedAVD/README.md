@@ -16,10 +16,10 @@ In academic computer labs, standard Android Studio installations waste dozens of
 | **Android Version** | Android 12.0 ("S", API 31) | Android 17.0 ("CinnamonBun", API 37.0) | API 31 for core curriculum; API 37 for modern platform features. |
 | **Image Variant** | `google_apis` (x86_64) | `google_apis` (x86_64) | Omits Play Store client app to save ~500 MB RAM, eliminate background update churn, and enable `adb root`. |
 | **Guest RAM / Heap**| **2048 MB** RAM / 512 MB Heap | **3072 MB** RAM / 512 MB Heap | 3072 MB gives Android 17 adequate headroom to prevent Low Memory Killer (LMK) process thrashing. |
-| **Resolution & Scale**| 1080×2280 @ 440 dpi | **720×1600** @ 320 dpi (Borderless) | Reduces pixel fill-rate by **55.5%** (1.15M vs 2.59M pixels), slashing shared GPU memory bandwidth on Intel UHD 770. |
+| **Resolution & Scale**| 1080×2280 @ 440 dpi | **720×1600** @ 320 dpi (Borderless, `pixel_4` flat profile) | Reduces pixel fill-rate by **55.5%**; using the `pixel_4` hardware profile eliminates camera cutout distortion on 720p. |
 | **vCPU Cores** | 4 cores (`hw.cpu.ncore=4`) | 4 cores (`hw.cpu.ncore=4`) | Fully utilizes i5-14500 P-cores via Thread Director while leaving 16 threads free for Windows 11 & Gradle. |
 | **GPU Acceleration** | `hw.gpu.mode=host` | `hw.gpu.mode=host` | Forces ANGLE Direct3D 11 hardware execution, bypassing slow SwiftShader software CPU fallback. |
-| **Boot Optimization**| Fastboot Quickboot Snapshot | Fastboot Quickboot Snapshot | Cold boots are bypassed after initial capture; snapshot boots execute in **~350 ms**. |
+| **Boot Optimization**| Fastboot Quickboot Snapshot | Fastboot Quickboot Snapshot | First run cold-boots (~2 mins); upon exit, saves a genuine host GPU snapshot enabling instant **~350 ms** QuickBoots for all subsequent students. |
 
 > [!TIP]
 > **Recommended Daily Usage in Classrooms**:
@@ -63,6 +63,35 @@ org.gradle.vfs.watch=true
 * **Why BOM-less**: Windows PowerShell 5.1's `Set-Content -Encoding UTF8` automatically inserts a 3-byte Byte Order Mark (`0xEF, 0xBB, 0xBF` / `ï»¿`). Android Studio's SDK parser (`AvdManager`) fails to parse keys prefixed with BOM bytes (`Error parsing config.ini: "ï»¿PlayStore.enabled = no" is not a valid syntax`).
 * **Implementation**: The script uses a custom `Set-IniValues` helper backed by .NET's `[System.Text.UTF8Encoding]::new($false)` to guarantee all `.ini` and `.properties` files are written strictly without a BOM.
 
+#### `pixel_4` Device Profile for 720p Scaling (Clean Unobstructed Display)
+* **The Cutout Distortion Problem**: Modern phone definitions (such as `pixel_7`) hardcode punch-hole camera cutout coordinates relative to their native 1080p width (`cutoutSpec = { M 506,68 ... @left }`). On 1080p, `x = 540` is dead center. When downscaled to 720p (where center is `x = 360`), Android continues to anchor the cutout at `x = 540` (75% across the screen), placing an unnatural camera hole on the right side and warping the status bar.
+* **The Solution**: The snapin specifies `-d pixel_4` for the API 37 AVD. Because the Pixel 4 features a bezel rather than a punch-hole or notch, the screen renders as a completely clean, rectangular canvas without any cutouts at 720×1600, while running the modern Android 17 (API 37.0) runtime and APIs.
+
+#### Host GPU QuickBoot & Seamless Multi-User Sharing Across Students
+* **The Session 0 Renderer Trap**: Attempting to pre-warm emulators headlessly in background deployment (`SYSTEM` Session 0) requires software rendering (`-gpu guest`), because direct hardware Direct3D/ANGLE contexts cannot be created without an interactive desktop display station. However, snapshots captured under `guest` GPU mode are automatically discarded with `WARNING: change of renderer detected` when a student later launches the emulator with `hw.gpu.mode=host`, forcing a cold boot anyway.
+* **The First-Run Host Snapshot Solution**:
+  1. The snapin finishes cleanly in FOG within **2–3 minutes** without running long, fragile emulator processes under `SYSTEM`.
+  2. The first student to launch an emulator performs a one-time clean cold boot (~2 minutes) in their interactive desktop session using genuine host GPU acceleration (`hw.gpu.mode=host` via ANGLE Direct3D 11 on the Intel UHD 770).
+  3. When Student A exits the emulator, QuickBoot automatically captures a pristine, hardware-compatible snapshot into `C:\Sdk\avd\<avd_name>.avd\snapshots\default_boot\`.
+* **Cross-Student Permissions (`*S-1-5-11:(OI)(CI)F`)**:
+  - The script pre-creates `C:\Sdk\.android` and grants `Authenticated Users` **FullControl (`F`)** on `C:\Sdk\avd` and `C:\Sdk\.android`, alongside **Modify (`M`)** on `C:\Sdk`.
+  - When Student B logs in for the next class period, Student B's process has full rights to:
+    - Load Student A's pre-warmed `host` snapshot in **~350 ms**.
+    - Delete stale lock files (`hardware-qemu.ini.lock`, `multiinstance.lock`) if Student A logged off abruptly.
+    - Save updated snapshots upon closing without permission collisions or "Access Denied" errors.
+
+#### Android Studio Welcome Screen Default (Open Projects Page)
+* **The Problem**: Android Studio defaults to `reopenLastProject=true`, automatically loading the last active project on startup. In shared academic computer labs, this causes the next student sitting at the workstation to inherit the previous student's unfinished project, files, and Git state.
+* **The Solution (Step 10)**: The script inspects `product-info.json` to identify the IDE data directory (e.g. `AndroidStudio2024.3`) and provisions `ide.general.xml`:
+  ```xml
+  <application>
+    <component name="GeneralSettings">
+      <option name="reopenLastProject" value="false" />
+    </component>
+  </application>
+  ```
+* **Inheritance & Flexibility**: The configuration is stamped into `C:\Users\Default\AppData\Roaming\Google\<StudioDir>\options` (inherited by all new user accounts) and applied to all existing profiles under `C:\Users\*`. This acts as an **optional default** rather than a locked policy—students who want auto-reopening can still change it in **Settings -> Appearance & Behavior -> System Settings -> Reopen projects on startup**.
+
 ---
 
 ## What the Script Does
@@ -76,12 +105,13 @@ org.gradle.vfs.watch=true
 4. **Command-Line Tools Provisioning**: Downloads and provisions Command-Line Tools v23.0+ (`15859902`) into `C:\Sdk\cmdline-tools\latest`.
 5. **Pre-Seeded License Endorsement**: Pre-seeds official cryptographic license hashes in `C:\Sdk\licenses` and accepts any remaining agreements via `sdkmanager --licenses`.
 6. **SDK Component Provisioning**: Installs `platform-tools`, `emulator`, `platforms;android-37.0`, `sources;android-37.0`, `build-tools;37.0.0`, `build-tools;36.0.0`, and system images `system-images;android-31;google_apis;x86_64` and `system-images;android-37.0;google_apis;x86_64`.
-7. **AVD Instantiation & Clean INI Tuning**: Creates `Pixel_4_API_31` and `Pixel_7_API_37` with dedicated memory, resolution, host GPU acceleration, and snapshot parameters written without duplicate keys or BOM artifacts.
-8. **Virtualization & Permissions**:
+7. **AVD Instantiation & Clean INI Tuning**: Creates `Pixel_4_API_31` and `Pixel_7_API_37` with dedicated memory, resolution, host GPU acceleration, and snapshot parameters (`fastboot.forceFastBoot=yes`, `fastboot.forceColdBoot=no`).
+8. **Virtualization, Environment & Multi-User Permissions**:
    - Enables Windows optional features `VirtualMachinePlatform` and `HypervisorPlatform` (WHPX) for Intel VT-x hardware virtualization.
-   - Configures system environment variables (`ANDROID_HOME`, `ANDROID_SDK_ROOT`, `ANDROID_AVD_HOME`, `ANDROID_USER_HOME`, `GRADLE_OPTS`, `PATH`).
-   - Grants `Authenticated Users` Modify permissions on `C:\Sdk` and `C:\Sdk\avd` so non-administrator students can compile and emulate seamlessly.
-9. **Machine-Wide Gradle Tuning**: Injects memory caps and acceleration properties into `C:\Users\Default\.gradle` and all local student profiles.
+   - Configures system and process environment variables (`ANDROID_HOME`, `ANDROID_SDK_ROOT`, `ANDROID_AVD_HOME`, `ANDROID_USER_HOME`, `PATH`).
+   - Pre-creates `C:\Sdk\.android` and grants `Authenticated Users` FullControl on `C:\Sdk\avd` and `C:\Sdk\.android`, and Modify on `C:\Sdk`.
+9. **Machine-Wide Gradle Tuning**: Injects memory caps (`-Xmx3072m -XX:MaxMetaspaceSize=512m`) and acceleration properties into `C:\Users\Default\.gradle`, all local student profiles, and the system-wide `GRADLE_OPTS` environment variable.
+10. **Android Studio Welcome Screen Default**: Injects `reopenLastProject=false` into `ide.general.xml` under `C:\Users\Default` and all existing user profiles so students always start at the project selection screen instead of opening previous students' projects.
 
 ---
 
@@ -91,6 +121,20 @@ org.gradle.vfs.watch=true
    * Official Download Portal: [https://developer.android.com/studio](https://developer.android.com/studio)
 2. Place the installer executable into this folder alongside [`deployAndroidStudio.ps1`](deployAndroidStudio.ps1).
 3. Ensure the filename matches `$InstallerName` (`android-studio-rabbit1-windows.exe`) or specify it via the `-InstallerName` parameter.
+
+---
+
+## Script Parameters & Configuration
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `-InstallerName` | `string` | `"android-studio-rabbit1-windows.exe"` | Filename of the local installer placed in the script folder. |
+| `-SdkRoot` | `string` | `"C:\Sdk"` | Target machine-wide directory for the Android SDK. |
+| `-AvdRoot` | `string` | `"C:\Sdk\avd"` | Target machine-wide directory for Android Virtual Devices. |
+| `-AvdName` | `string` | `"Pixel_4_API_31"` | Name of the primary/lightweight daily-driver emulator. |
+| `-AvdNameModern` | `string` | `"Pixel_7_API_37"` | Name of the modern Android 17 / API 37 emulator. |
+| `-MaxRetries` | `int` | `5` | Retry attempts for downloading SDK packages and tools. |
+| `-CmdLineToolsUrl` | `string` | `commandlinetools-win-15859902_latest.zip` | Fallback direct URL for Command-Line Tools v23.0+. |
 
 ---
 

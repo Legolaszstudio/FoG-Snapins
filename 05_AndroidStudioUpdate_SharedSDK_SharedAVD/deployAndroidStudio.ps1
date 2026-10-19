@@ -1,26 +1,28 @@
 <#
 .SYNOPSIS
     Automated mass deployment script for Android Studio, Android SDK (API 37.0), and dual shared emulators (Android 12 / API 31 & Android 17 / API 37.0).
+    Configures shared machine-wide SDK/AVD directories, host GPU acceleration (hw.gpu.mode=host), QuickBoot, and default Welcome Screen configuration.
     This version forcefully eradicates existing installations prior to executing a clean deployment.
 
 .DESCRIPTION
-    Designed for mass deployment (SCCM / Intune / GPO / PDQ Deploy / Admin shell).
+    Designed for mass deployment (SCCM / Intune / GPO / PDQ Deploy / FOG Client / Admin shell).
     1. Terminates conflicting processes (Android Studio, ADB, Emulator, Java).
     2. Auto-detects and silently uninstalls existing Android Studio instances (using synchronous NSIS handling).
     3. Auto-detects and completely purges all pre-existing SDK and AVD directories (including C:\Sdk, C:\Android, and user profiles).
     4. Silently installs Android Studio from the local installer in the script folder.
     5. Configures a shared system SDK path (C:\Sdk) and AVD path (C:\Sdk\avd).
     6. Reuses Android Studio's bundled JBR (Java) to execute SDK commands without extra JDK dependencies.
-    7. Provisions command-line tools into C:\Sdk\cmdline-tools\latest.
+    7. Provisions command-line tools v23.0+ into C:\Sdk\cmdline-tools\latest.
     8. Non-interactively accepts all Android SDK licenses.
     9. Installs platform (android-37.0), build-tools (36.0.0, 37.0.0), platform-tools, emulator, and Google APIs system images (android-31, android-37.0).
     10. Creates dual shared AVDs in C:\Sdk\avd:
         - Pixel_4_API_31: Android 12 (API 31) with Google APIs (2048 MB RAM, 4 vCPUs) for fast, lightweight lab testing.
         - Pixel_7_API_37: Android 17 (API 37.0) with Google APIs (3072 MB RAM, 720x1600 resolution, borderless) for modern API teaching.
     11. Enforces forced host GPU acceleration (hw.gpu.mode=host), fastboot quickboot, and hardware keyboard pass-through.
-    12. Configures Machine-level environment variables (ANDROID_HOME, ANDROID_SDK_ROOT, ANDROID_AVD_HOME, PATH)
-        and grants Authenticated Users Modify permissions on the shared SDK and AVD directories.
+    12. Configures Machine-level environment variables (ANDROID_HOME, ANDROID_SDK_ROOT, ANDROID_AVD_HOME, ANDROID_USER_HOME, PATH)
+        and grants Authenticated Users FullControl on AVD/User directories and Modify on SDK root, enabling multi-user QuickBoot sharing.
     13. Deploys machine-wide Gradle memory caps (3 GB heap / ~3.5 GB total) and build accelerations to C:\Users\Default and all profiles.
+    14. Injects Android Studio optional default to always open the Welcome / Project Selection page instead of auto-reopening the previous user's project.
 #>
 
 #Requires -RunAsAdministrator
@@ -341,7 +343,16 @@ if ($LocalZip) {
 } else {
     $ZipToExtract = "$env:TEMP\commandlinetools.zip"
     Write-Host "Downloading Command-Line Tools infrastructure from Google..." -ForegroundColor Gray
-    Start-BitsTransfer -Source $CmdLineToolsUrl -Destination $ZipToExtract
+    try {
+        Start-BitsTransfer -Source $CmdLineToolsUrl -Destination $ZipToExtract -ErrorAction Stop
+    } catch {
+        Write-Warning "Start-BitsTransfer failed ($($_.Exception.Message)). Falling back to curl/Invoke-WebRequest..."
+        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+            & curl.exe -sSL "$CmdLineToolsUrl" -o "$ZipToExtract"
+        } else {
+            (New-Object System.Net.WebClient).DownloadFile($CmdLineToolsUrl, $ZipToExtract)
+        }
+    }
 }
 
 Write-Host "Extracting Command-Line Tools to '$CmdLineToolsLatest'..." -ForegroundColor Gray
@@ -529,15 +540,16 @@ $AvdConfigurations = @(
             "hw.gpu.enabled"         = "yes"
             "hw.gpu.mode"            = "host"
             "fastboot.forceFastBoot" = "yes"
+            "fastboot.forceColdBoot" = "no"
             "PlayStore.enabled"      = "no"
             "hw.keyboard"            = "yes"
         }
     },
     @{
         Name        = $AvdNameModern
-        Device      = "pixel_7"
+        Device      = "pixel_4"
         SystemImage = "system-images;android-37.0;google_apis;x86_64"
-        Description = "Pixel 7 (Android 17, API 37.0, Google APIs - 720p Optimized)"
+        Description = "Android 17 (API 37.0, Google APIs - 720p Clean Pixel 4 Profile)"
         Settings    = @{
             "hw.cpu.ncore"           = "4"
             "hw.ramSize"             = "3072"
@@ -545,6 +557,7 @@ $AvdConfigurations = @(
             "hw.gpu.enabled"         = "yes"
             "hw.gpu.mode"            = "host"
             "fastboot.forceFastBoot" = "yes"
+            "fastboot.forceColdBoot" = "no"
             "PlayStore.enabled"      = "no"
             "hw.keyboard"            = "yes"
             "hw.lcd.width"           = "720"
@@ -610,13 +623,31 @@ foreach ($p in $PathsToAdd) {
 }
 [Environment]::SetEnvironmentVariable("Path", $CurrentSysPath, "Machine")
 
-# Authorize Authenticated Users with Modify permissions on the shared SDK and AVD directories
-Write-Host "Assigning baseline Modify permissions for Authenticated Users to $SdkRoot and $AvdRoot..." -ForegroundColor Gray
+# Also export variables directly into the current PowerShell process scope
+# This ensures that tools and emulator spawned in Step 9 immediately inherit ANDROID_AVD_HOME and PATH
+$env:ANDROID_HOME = $SdkRoot
+$env:ANDROID_SDK_ROOT = $SdkRoot
+$env:ANDROID_AVD_HOME = $AvdRoot
+$env:ANDROID_USER_HOME = "$SdkRoot\.android"
+$env:Path = "$SdkRoot\platform-tools;$SdkRoot\emulator;$CmdLineToolsLatest\bin;$env:Path"
+
+# Ensure shared .android directory exists for machine-wide adb/emulator configs
+$AndroidUserHome = "$SdkRoot\.android"
+if (-not (Test-Path $AndroidUserHome)) {
+    New-Item -ItemType Directory -Path $AndroidUserHome -Force | Out-Null
+}
+
+# Authorize Authenticated Users:
+# - Modify rights on C:\Sdk (allows reading/executing SDK tools and updating components)
+# - FullControl on C:\Sdk\avd and C:\Sdk\.android (guarantees that when Student A creates snapshots,
+#   locks, or userdata changes, Student B can cleanly load snapshots, overwrite them, and clear stale locks)
+Write-Host "Configuring multi-user permissions for Authenticated Users (C:\Sdk, C:\Sdk\avd, C:\Sdk\.android)..." -ForegroundColor Gray
 $AuthUserSid = [System.Security.Principal.SecurityIdentifier]::new(
     [System.Security.Principal.WellKnownSidType]::AuthenticatedUserSid,
     $null
 )
-$AccessRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+
+$ModifyRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
     $AuthUserSid,
     [System.Security.AccessControl.FileSystemRights]::Modify,
     [System.Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit",
@@ -624,11 +655,27 @@ $AccessRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
     [System.Security.AccessControl.AccessControlType]::Allow
 )
 
-foreach ($dir in @($SdkRoot, $AvdRoot)) {
+$FullControlRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+    $AuthUserSid,
+    [System.Security.AccessControl.FileSystemRights]::FullControl,
+    [System.Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit",
+    [System.Security.AccessControl.PropagationFlags]::None,
+    [System.Security.AccessControl.AccessControlType]::Allow
+)
+
+if (Test-Path $SdkRoot) {
+    $Acl = Get-Acl -Path $SdkRoot
+    $Acl.AddAccessRule($ModifyRule)
+    Set-Acl -Path $SdkRoot -AclObject $Acl
+    & icacls.exe $SdkRoot /grant "*S-1-5-11:(OI)(CI)M" /Q 2>$null
+}
+
+foreach ($dir in @($AvdRoot, $AndroidUserHome)) {
     if (Test-Path $dir) {
         $Acl = Get-Acl -Path $dir
-        $Acl.AddAccessRule($AccessRule)
+        $Acl.SetAccessRule($FullControlRule)
         Set-Acl -Path $dir -AclObject $Acl
+        & icacls.exe $dir /grant:r "*S-1-5-11:(OI)(CI)F" /T /Q 2>$null
     }
 }
 
@@ -704,10 +751,106 @@ if (Test-Path $UsersRoot) {
 [Environment]::SetEnvironmentVariable("GRADLE_OPTS", "-Dorg.gradle.jvmargs=""-Xmx3072m -XX:MaxMetaspaceSize=512m -XX:+UseG1GC -XX:+ParallelRefProcEnabled""", "Machine")
 Write-Host "Machine-wide GRADLE_OPTS environment variable set." -ForegroundColor Green
 
+# -------------------------------------------------------------------------
+# Step 10: Configure Android Studio Default Welcome Screen (Open Projects Page)
+# -------------------------------------------------------------------------
+Write-Step "Configuring Android Studio Welcome Screen Default (Open Projects Page)"
+
+# By default, Android Studio re-opens the last active project on startup.
+# In a shared lab, students should see the Welcome / Project Selection page instead of the previous student's project.
+# Setting reopenLastProject=false in ide.general.xml establishes this as an optional default:
+# students who prefer auto-reopening can still change it in Settings -> System Settings -> Reopen projects on startup.
+
+$ProductInfoPath = Join-Path -Path $StudioInstallDir -ChildPath "product-info.json"
+$DataDirName = "AndroidStudio*"
+if (Test-Path $ProductInfoPath) {
+    try {
+        $prodJson = Get-Content -Path $ProductInfoPath -Raw | ConvertFrom-Json
+        if ($prodJson.dataDirectoryName) {
+            $DataDirName = $prodJson.dataDirectoryName
+        }
+    } catch {}
+}
+
+function Set-StudioProjectPageDefault {
+    param([string]$OptionsDir)
+    if (-not (Test-Path $OptionsDir)) {
+        New-Item -ItemType Directory -Path $OptionsDir -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+    if (-not (Test-Path $OptionsDir)) { return }
+
+    $xmlFile = Join-Path -Path $OptionsDir -ChildPath "ide.general.xml"
+    if (-not (Test-Path $xmlFile)) {
+        $xmlContent = @(
+            '<application>',
+            '  <component name="GeneralSettings">',
+            '    <option name="reopenLastProject" value="false" />',
+            '  </component>',
+            '</application>'
+        ) -join "`r`n"
+        $utf8NoBomLocal = [System.Text.UTF8Encoding]::new($false)
+        [System.IO.File]::WriteAllText($xmlFile, $xmlContent, $utf8NoBomLocal)
+    } else {
+        try {
+            [xml]$doc = Get-Content -Path $xmlFile
+            $genComp = $doc.application.component | Where-Object { $_.name -eq "GeneralSettings" }
+            if (-not $genComp) {
+                $genComp = $doc.CreateElement("component")
+                $genComp.SetAttribute("name", "GeneralSettings")
+                $doc.application.AppendChild($genComp) | Out-Null
+            }
+            $opt = $genComp.option | Where-Object { $_.name -eq "reopenLastProject" }
+            if (-not $opt) {
+                $opt = $doc.CreateElement("option")
+                $opt.SetAttribute("name", "reopenLastProject")
+                $opt.SetAttribute("value", "false")
+                $genComp.AppendChild($opt) | Out-Null
+                $doc.Save($xmlFile)
+            } elseif ($opt.value -ne "false") {
+                $opt.SetAttribute("value", "false")
+                $doc.Save($xmlFile)
+            }
+        } catch {
+            Write-Warning "Could not update $($xmlFile) - $_"
+        }
+    }
+}
+
+# 1. Seed into C:\Users\Default so all future student logins automatically inherit this default
+$DefaultOptionsDir = "$env:SystemDrive\Users\Default\AppData\Roaming\Google\$DataDirName\options"
+Set-StudioProjectPageDefault -OptionsDir $DefaultOptionsDir
+Write-Host "Default user profile template provisioned: $DefaultOptionsDir\ide.general.xml" -ForegroundColor Gray
+
+# 2. Apply to all existing local user profiles on the workstation
+$UsersRoot = "$env:SystemDrive\Users"
+if (Test-Path $UsersRoot) {
+    Get-ChildItem -Path $UsersRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $uName = $_.Name
+        $uDir = $_.FullName
+        if ($uName -notin @("Public", "All Users", "Default User")) {
+            $googleDir = Join-Path -Path $uDir -ChildPath "AppData\Roaming\Google"
+            if (Test-Path $googleDir) {
+                Get-ChildItem -Path $googleDir -Directory -Filter "AndroidStudio*" -ErrorAction SilentlyContinue | ForEach-Object {
+                    $optDir = Join-Path -Path $_.FullName -ChildPath "options"
+                    Set-StudioProjectPageDefault -OptionsDir $optDir
+                    Write-Host "Set welcome screen default for existing profile: $($_.FullName)" -ForegroundColor Gray
+                }
+            } else {
+                $optDir = Join-Path -Path $uDir -ChildPath "AppData\Roaming\Google\$DataDirName\options"
+                Set-StudioProjectPageDefault -OptionsDir $optDir
+            }
+        }
+    }
+}
+Write-Host "Android Studio welcome screen default applied." -ForegroundColor Green
+
 Write-Step "Deployment Executed Successfully!"
 Write-Host "Android Studio : $StudioInstallDir" -ForegroundColor Green
 Write-Host "Android SDK    : $SdkRoot (API 37.0, Build-Tools 36.0.0 & 37.0.0, Platform-Tools)" -ForegroundColor Green
 Write-Host "AVDs Created   : $AvdName (Android 12, API 31, Google APIs) & $AvdNameModern (Android 17, API 37.0, Google APIs, 720p)" -ForegroundColor Green
 Write-Host "AVD Directory  : $AvdRoot" -ForegroundColor Green
 Write-Host "Host GPU Accel : Force-enabled (hw.gpu.mode=host via ANGLE Direct3D 11)" -ForegroundColor Green
+Write-Host "QuickBoot State: Enabled (host GPU snapshot captured on 1st student run, shared across all users)" -ForegroundColor Green
+Write-Host "Permissions    : Authenticated Users FullControl on AVDs & .android, Modify on SDK root" -ForegroundColor Green
 Write-Host "Gradle Tuning  : 3 GB Heap Cap, Parallel Builds, Build Cache, VFS Watch" -ForegroundColor Green
+Write-Host "Studio Default : Welcome / Project Selection page set as default for all users" -ForegroundColor Green
