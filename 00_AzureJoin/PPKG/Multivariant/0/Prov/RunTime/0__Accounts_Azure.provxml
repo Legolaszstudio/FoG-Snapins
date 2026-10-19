@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<wap-provisioningdoc>
+  <characteristic type="AADJ">
+    <parm SettingsPath="Accounts/Azure/Authority" name="Authority" value="https://login.microsoftonline.com/common" datatype="string" />
+    <parm SettingsPath="Accounts/Azure/BPRT" name="BPRT" value="[REDACTED]" datatype="string" />
+  </characteristic>
+</wap-provisioningdoc>

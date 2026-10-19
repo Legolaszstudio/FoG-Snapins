@@ -1,0 +1,15 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<wap-provisioningdoc>
+  <characteristic type="DevDetail">
+    <characteristic type="Ext">
+      <characteristic type="Microsoft">
+        <parm SettingsPath="DevDetail/DNSComputerName" name="DNSComputerName" value="petrik-%serial%" datatype="string" />
+      </characteristic>
+    </characteristic>
+  </characteristic>
+  <characteristic type="Provisioning">
+    <characteristic type="ForceSettingReload">
+      <parm SettingsPath="DevDetail/DNSComputerName" name="DNSComputerName" value="1" datatype="integer" />
+    </characteristic>
+  </characteristic>
+</wap-provisioningdoc>

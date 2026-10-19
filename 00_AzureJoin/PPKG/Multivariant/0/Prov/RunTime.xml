@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<ConfigurationSource Version="1.0">
+  <ConfigurationSet Type="provxml" SettingsGroup="641c3728-5623-544a-9144-976a2dbf3ca9" Data="$(_prov)\RunTime\0__Accounts_Azure.provxml" />
+  <ConfigurationSet Type="provxml" SettingsGroup="1d06ee0e-b4a8-559b-b253-c7f645eb1b9c" Data="$(_prov)\RunTime\1__Policies_ApplicationManagement_AllowAllTrustedApps.provxml" />
+  <ConfigurationSet Type="provxml" SettingsGroup="f642e983-6321-501e-a554-86b53d319ad8" Data="$(_prov)\RunTime\2__DevDetail_DNSComputerName.provxml" />
+  <ConfigurationSet Type="provxml" SettingsGroup="b786dbf1-ec31-5be5-aa49-934e4489fae9" Data="$(_prov)\RunTime\3__OOBE_Desktop_HideOobe.provxml" />
+</ConfigurationSource>

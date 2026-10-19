@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<wap-provisioningdoc>
+  <characteristic type="MCSF">
+    <characteristic type="OOBE">
+      <characteristic type="Desktop">
+        <parm SettingsPath="OOBE/Desktop/HideOobe" name="HideOobe" value="true" datatype="boolean" />
+      </characteristic>
+    </characteristic>
+  </characteristic>
+</wap-provisioningdoc>

@@ -1,0 +1,11 @@
+# Installers and large binary packages (exceed GitHub 100MB limit)
+*.exe
+*.msi
+*.zip
+*.iso
+
+# Sensitive provisioning packages (prevent accidental BPRT leaks)
+*.ppkg
+
+# Logs and temporary files
+*.log
