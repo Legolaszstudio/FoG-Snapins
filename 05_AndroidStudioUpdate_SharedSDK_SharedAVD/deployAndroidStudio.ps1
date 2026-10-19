@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Automated mass deployment script for Android Studio, Android SDK (API 31), and a Pixel 4 Emulator (Android 12 with Google Play).
+    Automated mass deployment script for Android Studio, Android SDK (API 37.0), and dual shared emulators (Android 12 / API 31 & Android 17 / API 37.0).
     This version forcefully eradicates existing installations prior to executing a clean deployment.
 
 .DESCRIPTION
@@ -13,8 +13,10 @@
     6. Reuses Android Studio's bundled JBR (Java) to execute SDK commands without extra JDK dependencies.
     7. Provisions command-line tools into C:\Sdk\cmdline-tools\latest.
     8. Non-interactively accepts all Android SDK licenses.
-    9. Installs platforms;android-31, build-tools;31.0.0, platform-tools, emulator, and Google Play system image.
-    10. Creates a Pixel 4 AVD running Android 12 with Google Play support.
+    9. Installs platform (android-37.0), build-tools (36.0.0, 37.0.0), platform-tools, emulator, and Google Play system images (android-31, android-37.0).
+    10. Creates dual shared AVDs in C:\Sdk\avd:
+        - Pixel_4_API_31: Android 12 (API 31) with Google Play for fast, lightweight performance on lab workstations.
+        - Pixel_7_API_37: Android 17 (API 37.0) with Google Play for teaching cutting-edge APIs.
     11. Configures Machine-level environment variables (ANDROID_HOME, ANDROID_SDK_ROOT, ANDROID_AVD_HOME, PATH)
         and grants Authenticated Users Modify permissions on the shared SDK and AVD directories.
 #>
@@ -31,8 +33,11 @@ param(
     # Shared root directory for Android Virtual Devices (AVDs)
     [string]$AvdRoot = "C:\Sdk\avd",
 
-    # Name of the emulator to create
+    # Name of the lightweight/fallback emulator
     [string]$AvdName = "Pixel_4_API_31",
+
+    # Name of the modern API 37 emulator
+    [string]$AvdNameModern = "Pixel_7_API_37",
 
     # Maximum download retry attempts per SDK package
     [int]$MaxRetries = 5,
@@ -419,12 +424,13 @@ $env:JAVA_OPTS = "-Dsun.net.client.defaultConnectTimeout=60000 -Dsun.net.client.
 
 $Packages = @(
     "platform-tools",
-    "cmdline-tools;latest",
     "emulator",
-    "platforms;android-31",
-    "sources;android-31",
-    "build-tools;31.0.0",
-    "system-images;android-31;google_apis_playstore;x86_64"
+    "platforms;android-37.0",
+    "sources;android-37.0",
+    "build-tools;37.0.0",
+    "build-tools;36.0.0",
+    "system-images;android-31;google_apis_playstore;x86_64",
+    "system-images;android-37.0;google_apis_playstore;x86_64"
 )
 
 Write-Host "Acquiring SDK dependencies..." -ForegroundColor Gray
@@ -462,32 +468,57 @@ foreach ($pkg in $Packages) {
 Write-Host "SDK components provisioned comprehensively." -ForegroundColor Green
 
 # -------------------------------------------------------------------------
-# Step 7: Instantiate the Pixel 4 AVD
+# Step 7: Instantiate Shared AVDs (Dual Emulators: API 31 & API 37.0)
 # -------------------------------------------------------------------------
-Write-Step "Instantiating AVD: $AvdName"
+Write-Step "Instantiating Shared AVDs (API 31 & API 37.0)"
 
 $env:ANDROID_AVD_HOME = $AvdRoot
-$SystemImage = "system-images;android-31;google_apis_playstore;x86_64"
 
-# Piping "no" bypasses the interactive custom hardware profile prompt
-& cmd.exe /c "echo no | `"$AvdManager`" create avd -n `"$AvdName`" -k `"$SystemImage`" -d `"pixel_4`" --force"
+$AvdConfigurations = @(
+    @{
+        Name        = $AvdName
+        Device      = "pixel_4"
+        SystemImage = "system-images;android-31;google_apis_playstore;x86_64"
+        Description = "Pixel 4 (Android 12, API 31, Google Play)"
+    },
+    @{
+        Name        = $AvdNameModern
+        Device      = "pixel_7"
+        SystemImage = "system-images;android-37.0;google_apis_playstore;x86_64"
+        Description = "Pixel 7 (Android 17, API 37.0, Google Play)"
+    }
+)
 
-if ($LASTEXITCODE -ne 0) {
-    throw "avdmanager failed to instantiate AVD '$AvdName' (exit code $LASTEXITCODE)."
+foreach ($avd in $AvdConfigurations) {
+    $currentName = $avd.Name
+    $currentDevice = $avd.Device
+    $currentImage = $avd.SystemImage
+
+    Write-Host "Creating AVD '$currentName' ($($avd.Description))..." -ForegroundColor Cyan
+
+    # Piping "no" bypasses the interactive custom hardware profile prompt
+    & cmd.exe /c "echo no | `"$AvdManager`" create avd -n `"$currentName`" -k `"$currentImage`" -d `"$currentDevice`" --force"
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "avdmanager failed to instantiate AVD '$currentName' (exit code $LASTEXITCODE)."
+    }
+
+    # Fine-tune emulator configuration to optimize virtualization performance
+    $ConfigFile = Join-Path -Path $AvdRoot -ChildPath "$currentName.avd\config.ini"
+    if (Test-Path $ConfigFile) {
+        Write-Host "Injecting optimized hardware specifications for '$currentName'..." -ForegroundColor Gray
+        Add-Content -Path $ConfigFile -Value @(
+            "hw.cpu.ncore=4",
+            "hw.ramSize=2048",
+            "vm.heapSize=512",
+            "hw.gpu.enabled=yes",
+            "hw.gpu.mode=auto",
+            "fastboot.forceFastBoot=yes",
+            "PlayStore.enabled=yes"
+        )
+    }
+    Write-Host "AVD '$currentName' generated successfully." -ForegroundColor Green
 }
-
-# Fine-tune emulator configuration to optimize virtualization performance
-$ConfigFile = Join-Path -Path $AvdRoot -ChildPath "$AvdName.avd\config.ini"
-if (Test-Path $ConfigFile) {
-    Write-Host "Injecting optimized hardware specifications..." -ForegroundColor Gray
-    Add-Content -Path $ConfigFile -Value @(
-        "hw.ramSize=2048",
-        "vm.heapSize=512",
-        "hw.gpu.enabled=yes",
-        "hw.gpu.mode=auto"
-    )
-}
-Write-Host "AVD '$AvdName' generated successfully." -ForegroundColor Green
 
 # -------------------------------------------------------------------------
 # Step 8: Configure Environment Variables & Permissions
@@ -542,8 +573,27 @@ foreach ($dir in @($SdkRoot, $AvdRoot)) {
     }
 }
 
+# Ensure virtualization platform features are enabled for Android Emulator, WSL2, and VirtualBox
+Write-Host "Verifying hardware virtualization features (VirtualMachinePlatform & HypervisorPlatform)..." -ForegroundColor Gray
+$VirtualizationFeatures = @(
+    "VirtualMachinePlatform",
+    "HypervisorPlatform"
+)
+
+foreach ($feat in $VirtualizationFeatures) {
+    try {
+        $featureState = Get-WindowsOptionalFeature -Online -FeatureName $feat -ErrorAction SilentlyContinue
+        if ($featureState -and $featureState.State -ne "Enabled") {
+            Write-Host "Enabling Windows feature '$feat' for hardware virtualization..." -ForegroundColor Cyan
+            Enable-WindowsOptionalFeature -Online -FeatureName $feat -All -NoRestart -ErrorAction SilentlyContinue | Out-Null
+        }
+    } catch {
+        Write-Warning "Could not query or enable optional feature '$feat': $_"
+    }
+}
+
 Write-Step "Deployment Executed Successfully!"
 Write-Host "Android Studio : $StudioInstallDir" -ForegroundColor Green
-Write-Host "Android SDK    : $SdkRoot (API 31, Build-Tools 31.0.0, Platform-Tools)" -ForegroundColor Green
-Write-Host "AVD Created    : $AvdName (Pixel 4, Android 12, Google Play)" -ForegroundColor Green
+Write-Host "Android SDK    : $SdkRoot (API 37.0, Build-Tools 36.0.0 & 37.0.0, Platform-Tools)" -ForegroundColor Green
+Write-Host "AVDs Created   : $AvdName (Android 12, API 31) & $AvdNameModern (Android 17, API 37.0)" -ForegroundColor Green
 Write-Host "AVD Directory  : $AvdRoot" -ForegroundColor Green
