@@ -13,12 +13,14 @@
     6. Reuses Android Studio's bundled JBR (Java) to execute SDK commands without extra JDK dependencies.
     7. Provisions command-line tools into C:\Sdk\cmdline-tools\latest.
     8. Non-interactively accepts all Android SDK licenses.
-    9. Installs platform (android-37.0), build-tools (36.0.0, 37.0.0), platform-tools, emulator, and Google Play system images (android-31, android-37.0).
+    9. Installs platform (android-37.0), build-tools (36.0.0, 37.0.0), platform-tools, emulator, and Google APIs system images (android-31, android-37.0).
     10. Creates dual shared AVDs in C:\Sdk\avd:
-        - Pixel_4_API_31: Android 12 (API 31) with Google Play for fast, lightweight performance on lab workstations.
-        - Pixel_7_API_37: Android 17 (API 37.0) with Google Play for teaching cutting-edge APIs.
-    11. Configures Machine-level environment variables (ANDROID_HOME, ANDROID_SDK_ROOT, ANDROID_AVD_HOME, PATH)
+        - Pixel_4_API_31: Android 12 (API 31) with Google APIs (2048 MB RAM, 4 vCPUs) for fast, lightweight lab testing.
+        - Pixel_7_API_37: Android 17 (API 37.0) with Google APIs (3072 MB RAM, 720x1600 resolution, borderless) for modern API teaching.
+    11. Enforces forced host GPU acceleration (hw.gpu.mode=host), fastboot quickboot, and hardware keyboard pass-through.
+    12. Configures Machine-level environment variables (ANDROID_HOME, ANDROID_SDK_ROOT, ANDROID_AVD_HOME, PATH)
         and grants Authenticated Users Modify permissions on the shared SDK and AVD directories.
+    13. Deploys machine-wide Gradle memory caps (3 GB heap / ~3.5 GB total) and build accelerations to C:\Users\Default and all profiles.
 #>
 
 #Requires -RunAsAdministrator
@@ -42,8 +44,8 @@ param(
     # Maximum download retry attempts per SDK package
     [int]$MaxRetries = 5,
 
-    # Fallback URL for Command-Line Tools if not cached locally
-    [string]$CmdLineToolsUrl = "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip"
+    # Fallback URL for Command-Line Tools if not cached locally (v23.0+ required for Android 17 / API 37.0 decimal support)
+    [string]$CmdLineToolsUrl = "https://dl.google.com/android/repository/commandlinetools-win-15859902_latest.zip"
 )
 
 $ErrorActionPreference = "Stop"
@@ -429,8 +431,8 @@ $Packages = @(
     "sources;android-37.0",
     "build-tools;37.0.0",
     "build-tools;36.0.0",
-    "system-images;android-31;google_apis_playstore;x86_64",
-    "system-images;android-37.0;google_apis_playstore;x86_64"
+    "system-images;android-31;google_apis;x86_64",
+    "system-images;android-37.0;google_apis;x86_64"
 )
 
 Write-Host "Acquiring SDK dependencies..." -ForegroundColor Gray
@@ -474,18 +476,83 @@ Write-Step "Instantiating Shared AVDs (API 31 & API 37.0)"
 
 $env:ANDROID_AVD_HOME = $AvdRoot
 
+function Set-IniValues {
+    param(
+        [Parameter(Mandatory=$true)][string]$FilePath,
+        [Parameter(Mandatory=$true)][hashtable]$Settings
+    )
+    if (-not (Test-Path $FilePath)) { return }
+
+    # Android SDK AvdManager requires UTF-8 WITHOUT BOM (or ASCII).
+    # Windows PowerShell's Set-Content -Encoding UTF8 emits a 3-byte BOM (0xEF, 0xBB, 0xBF / ï»¿)
+    # which causes AvdManager to crash with: Error parsing config.ini: "ï»¿..." is not a valid syntax.
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    $lines = [System.IO.File]::ReadAllLines($FilePath)
+    $updatedKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $newLines = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($line in $lines) {
+        # Strip any stray leading BOM character (0xFEFF) from the line
+        $cleanLine = $line.TrimStart([char]0xFEFF)
+        if ($cleanLine -match '^\s*([^#;=\s]+)\s*=\s*(.*)$') {
+            $key = $Matches[1].Trim()
+            if ($Settings.ContainsKey($key)) {
+                $newLines.Add("$key = $($Settings[$key])")
+                $updatedKeys.Add($key) | Out-Null
+            } else {
+                $newLines.Add($cleanLine)
+            }
+        } else {
+            $newLines.Add($cleanLine)
+        }
+    }
+
+    foreach ($key in $Settings.Keys) {
+        if (-not $updatedKeys.Contains($key)) {
+            $newLines.Add("$key = $($Settings[$key])")
+        }
+    }
+
+    [System.IO.File]::WriteAllLines($FilePath, $newLines, $utf8NoBom)
+}
+
 $AvdConfigurations = @(
     @{
         Name        = $AvdName
         Device      = "pixel_4"
-        SystemImage = "system-images;android-31;google_apis_playstore;x86_64"
-        Description = "Pixel 4 (Android 12, API 31, Google Play)"
+        SystemImage = "system-images;android-31;google_apis;x86_64"
+        Description = "Pixel 4 (Android 12, API 31, Google APIs)"
+        Settings    = @{
+            "hw.cpu.ncore"           = "4"
+            "hw.ramSize"             = "2048"
+            "vm.heapSize"            = "512"
+            "hw.gpu.enabled"         = "yes"
+            "hw.gpu.mode"            = "host"
+            "fastboot.forceFastBoot" = "yes"
+            "PlayStore.enabled"      = "no"
+            "hw.keyboard"            = "yes"
+        }
     },
     @{
         Name        = $AvdNameModern
         Device      = "pixel_7"
-        SystemImage = "system-images;android-37.0;google_apis_playstore;x86_64"
-        Description = "Pixel 7 (Android 17, API 37.0, Google Play)"
+        SystemImage = "system-images;android-37.0;google_apis;x86_64"
+        Description = "Pixel 7 (Android 17, API 37.0, Google APIs - 720p Optimized)"
+        Settings    = @{
+            "hw.cpu.ncore"           = "4"
+            "hw.ramSize"             = "3072"
+            "vm.heapSize"            = "512"
+            "hw.gpu.enabled"         = "yes"
+            "hw.gpu.mode"            = "host"
+            "fastboot.forceFastBoot" = "yes"
+            "PlayStore.enabled"      = "no"
+            "hw.keyboard"            = "yes"
+            "hw.lcd.width"           = "720"
+            "hw.lcd.height"          = "1600"
+            "hw.lcd.density"         = "320"
+            "skin.name"              = "720x1600"
+            "showDeviceFrame"        = "no"
+        }
     }
 )
 
@@ -507,15 +574,7 @@ foreach ($avd in $AvdConfigurations) {
     $ConfigFile = Join-Path -Path $AvdRoot -ChildPath "$currentName.avd\config.ini"
     if (Test-Path $ConfigFile) {
         Write-Host "Injecting optimized hardware specifications for '$currentName'..." -ForegroundColor Gray
-        Add-Content -Path $ConfigFile -Value @(
-            "hw.cpu.ncore=4",
-            "hw.ramSize=2048",
-            "vm.heapSize=512",
-            "hw.gpu.enabled=yes",
-            "hw.gpu.mode=auto",
-            "fastboot.forceFastBoot=yes",
-            "PlayStore.enabled=yes"
-        )
+        Set-IniValues -FilePath $ConfigFile -Settings $avd.Settings
     }
     Write-Host "AVD '$currentName' generated successfully." -ForegroundColor Green
 }
@@ -592,8 +651,63 @@ foreach ($feat in $VirtualizationFeatures) {
     }
 }
 
+# -------------------------------------------------------------------------
+# Step 9: Configure Machine-Wide Gradle Performance & Memory Limits
+# -------------------------------------------------------------------------
+Write-Step "Configuring Machine-Wide Gradle Performance & Memory Caps"
+
+# Capping Gradle daemon memory to 3072 MB heap + 512 MB Metaspace keeps total Gradle footprint under 3.5 GB.
+# This ensures that on 16 GB workstations, Gradle, Android Studio, Windows 11, and the AVD do not exhaust RAM.
+$GradlePropsContent = @(
+    "# Machine-wide Gradle configuration for 16 GB Lab Workstations (HP SFF i5-14500)",
+    "# Enforces a 3 GB max JVM heap and 512 MB Metaspace cap to prevent host memory exhaustion",
+    "org.gradle.jvmargs=-Xmx3072m -XX:MaxMetaspaceSize=512m -XX:+UseG1GC -XX:+ParallelRefProcEnabled",
+    "org.gradle.parallel=true",
+    "org.gradle.caching=true",
+    "org.gradle.vfs.watch=true"
+) -join "`r`n"
+
+# 1. Seed into C:\Users\Default\.gradle so all future student logins automatically inherit this configuration
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+$DefaultUserProfile = "$env:SystemDrive\Users\Default"
+if (Test-Path $DefaultUserProfile) {
+    $DefaultGradleDir = Join-Path -Path $DefaultUserProfile -ChildPath ".gradle"
+    if (-not (Test-Path $DefaultGradleDir)) {
+        New-Item -ItemType Directory -Path $DefaultGradleDir -Force | Out-Null
+    }
+    $targetPath = Join-Path -Path $DefaultGradleDir -ChildPath "gradle.properties"
+    [System.IO.File]::WriteAllText($targetPath, $GradlePropsContent, $utf8NoBom)
+    Write-Host "Default user profile template provisioned: $targetPath" -ForegroundColor Gray
+}
+
+# 2. Update all existing user profiles on the workstation
+$UsersRoot = "$env:SystemDrive\Users"
+if (Test-Path $UsersRoot) {
+    Get-ChildItem -Path $UsersRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $uDir = $_.FullName
+        $uName = $_.Name
+        if ($uName -notin @("Public", "All Users", "Default User")) {
+            $uGradleDir = Join-Path -Path $uDir -ChildPath ".gradle"
+            if (-not (Test-Path $uGradleDir)) {
+                New-Item -ItemType Directory -Path $uGradleDir -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+            if (Test-Path $uGradleDir) {
+                $targetFile = Join-Path -Path $uGradleDir -ChildPath "gradle.properties"
+                [System.IO.File]::WriteAllText($targetFile, $GradlePropsContent, $utf8NoBom)
+                Write-Host "Configured Gradle properties for existing profile: $uDir" -ForegroundColor Gray
+            }
+        }
+    }
+}
+
+# 3. Set machine-level GRADLE_OPTS environment variable as fallback
+[Environment]::SetEnvironmentVariable("GRADLE_OPTS", "-Dorg.gradle.jvmargs=""-Xmx3072m -XX:MaxMetaspaceSize=512m -XX:+UseG1GC -XX:+ParallelRefProcEnabled""", "Machine")
+Write-Host "Machine-wide GRADLE_OPTS environment variable set." -ForegroundColor Green
+
 Write-Step "Deployment Executed Successfully!"
 Write-Host "Android Studio : $StudioInstallDir" -ForegroundColor Green
 Write-Host "Android SDK    : $SdkRoot (API 37.0, Build-Tools 36.0.0 & 37.0.0, Platform-Tools)" -ForegroundColor Green
-Write-Host "AVDs Created   : $AvdName (Android 12, API 31) & $AvdNameModern (Android 17, API 37.0)" -ForegroundColor Green
+Write-Host "AVDs Created   : $AvdName (Android 12, API 31, Google APIs) & $AvdNameModern (Android 17, API 37.0, Google APIs, 720p)" -ForegroundColor Green
 Write-Host "AVD Directory  : $AvdRoot" -ForegroundColor Green
+Write-Host "Host GPU Accel : Force-enabled (hw.gpu.mode=host via ANGLE Direct3D 11)" -ForegroundColor Green
+Write-Host "Gradle Tuning  : 3 GB Heap Cap, Parallel Builds, Build Cache, VFS Watch" -ForegroundColor Green
